@@ -54,8 +54,8 @@ class VideoGenerationRequest(BaseModel):
     camera_control: Optional[CameraControl] = Field(None, description="Camera movement controls")
     model_name: str = Field(
         default="kling-v2-6",
-        description="Model to use (kling-v1, kling-v1-5, kling-v2-6)",
-        pattern="^(kling-v1|kling-v1-5|kling-v2-6)$"
+        description="Model to use (kling-v1, kling-v1-5, kling-v2-5, kling-v2-6)",
+        pattern="^(kling-v1|kling-v1-5|kling-v2-5|kling-v2-6)$"
     )
     duration: str = Field(
         default="10",
