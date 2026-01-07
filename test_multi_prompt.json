@@ -1,0 +1,59 @@
+{
+  "test_name": "Multi-Prompt Video Generation Test",
+  "description": "Test video generation with multiple prompts for scene transitions",
+  "test_cases": [
+    {
+      "name": "3-Scene Story (30s total)",
+      "payload": {
+        "prompts": [
+          "Wide shot of misty forest at dawn, soft golden light filtering through ancient trees, camera static, peaceful atmosphere, cinematic 4k",
+          "Camera slowly moves forward through the forest path, revealing a small clearing with wildflowers, gentle movement, serene mood",
+          "Close-up of morning dew on vibrant green leaves, bokeh background with soft light rays, macro detail, tranquil scene"
+        ],
+        "model_name": "kling-v2-6",
+        "duration": "10",
+        "aspect_ratio": "16:9",
+        "mode": "pro",
+        "sound": "on"
+      },
+      "expected_duration": 30,
+      "expected_iterations": 3
+    },
+    {
+      "name": "2-Scene Transition (20s total)",
+      "payload": {
+        "prompts": [
+          "Aerial view of ocean waves crashing on rocky shore, dramatic sunset colors, smooth drone movement, epic landscape",
+          "Camera descends to ground level, focusing on sea foam patterns on wet sand, warm golden hour lighting, peaceful ending"
+        ],
+        "model_name": "kling-v2-6",
+        "duration": "10",
+        "aspect_ratio": "16:9",
+        "mode": "pro",
+        "sound": "on"
+      },
+      "expected_duration": 20,
+      "expected_iterations": 2
+    },
+    {
+      "name": "Single Prompt with Target Duration (30s)",
+      "payload": {
+        "prompt": "Medium shot of vintage record player spinning, warm amber lighting, vinyl texture visible, static camera with shallow depth of field, nostalgic atmosphere, 4k",
+        "model_name": "kling-v2-6",
+        "duration": "10",
+        "aspect_ratio": "16:9",
+        "mode": "pro",
+        "sound": "on",
+        "target_duration": 30
+      },
+      "expected_duration": 30,
+      "expected_iterations": 3,
+      "note": "Uses same prompt for all extensions"
+    }
+  ],
+  "curl_examples": {
+    "multi_prompt": "curl -X POST https://kling-video-service-production.up.railway.app/generate-video \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"prompts\": [\n      \"Scene 1: Forest at dawn\",\n      \"Scene 2: Path through trees\",\n      \"Scene 3: Close-up of leaves\"\n    ],\n    \"model_name\": \"kling-v2-6\",\n    \"duration\": \"10\",\n    \"aspect_ratio\": \"16:9\",\n    \"mode\": \"pro\"\n  }'",
+    "single_prompt_extended": "curl -X POST https://kling-video-service-production.up.railway.app/generate-video \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"prompt\": \"Cinematic scene description\",\n    \"target_duration\": 30,\n    \"model_name\": \"kling-v2-6\",\n    \"duration\": \"10\",\n    \"aspect_ratio\": \"16:9\",\n    \"mode\": \"pro\"\n  }'"
+  }
+}
+

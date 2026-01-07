@@ -45,7 +45,8 @@ class CameraControl(BaseModel):
     zoom: Optional[int] = Field(None, description="Zoom movement (-10 to 10)")
 
 class VideoGenerationRequest(BaseModel):
-    prompt: str = Field(..., description="Video generation prompt", min_length=10, max_length=2500)
+    prompt: Optional[str] = Field(None, description="Single video generation prompt", min_length=10, max_length=2500)
+    prompts: Optional[list[str]] = Field(None, description="Array of prompts for multi-segment videos. If provided, overrides 'prompt'.")
     negative_prompt: Optional[str] = Field(
         default="blurry, distorted, low quality, watermark, text, ugly, deformed",
         description="What to avoid in the video"
@@ -151,15 +152,27 @@ async def generate_video(request: VideoGenerationRequest):
     start_time = time.time()
     
     logger.info(f"[{job_id}] Starting video generation")
-    logger.info(f"[{job_id}] Prompt: {request.prompt[:100]}...")
+    
+    # Handle prompts array vs single prompt
+    if request.prompts:
+        prompts_list = request.prompts[:20]  # Max 20 segments
+        initial_prompt = prompts_list[0]
+        logger.info(f"[{job_id}] Using multi-prompt mode: {len(prompts_list)} prompts")
+    elif request.prompt:
+        prompts_list = [request.prompt]
+        initial_prompt = request.prompt
+    else:
+        raise HTTPException(status_code=400, detail="Either 'prompt' or 'prompts' must be provided")
+    
+    logger.info(f"[{job_id}] Initial prompt: {initial_prompt[:100]}...")
     
     try:
         # Step 1: Generate JWT
         jwt_token = _generate_jwt()
         logger.info(f"[{job_id}] JWT generated successfully")
         
-        # Step 2: Create initial video
-        task_id = _create_video(jwt_token, request, job_id)
+        # Step 2: Create initial video with first prompt
+        task_id = _create_video(jwt_token, request, job_id, initial_prompt)
         logger.info(f"[{job_id}] Video creation started - Task ID: {task_id}")
         
         # Step 3: Poll for completion and get video_id
@@ -174,19 +187,27 @@ async def generate_video(request: VideoGenerationRequest):
         current_duration = int(request.duration)
         iterations = 1
         
-        # Step 5: Extend if target_duration is set
+        # Step 5: Extend if target_duration is set OR if we have multiple prompts
+        extensions_needed = 0
         if request.target_duration and request.target_duration > current_duration:
             extensions_needed = (request.target_duration - current_duration + int(request.duration) - 1) // int(request.duration)
-            logger.info(f"[{job_id}] Extensions needed: {extensions_needed} to reach {request.target_duration}s")
+        elif len(prompts_list) > 1:
+            # Use remaining prompts for extensions
+            extensions_needed = len(prompts_list) - 1
+        
+        if extensions_needed > 0:
+            logger.info(f"[{job_id}] Extensions needed: {extensions_needed}")
             
             for i in range(extensions_needed):
-                if current_duration >= request.target_duration:
+                if request.target_duration and current_duration >= request.target_duration:
                     break
                     
-                logger.info(f"[{job_id}] Extension {i+1}/{extensions_needed} - Current: {current_duration}s")
+                # Use next prompt in sequence, or reuse first if not enough prompts
+                extension_prompt = prompts_list[i + 1] if (i + 1) < len(prompts_list) else prompts_list[0]
+                logger.info(f"[{job_id}] Extension {i+1}/{extensions_needed} - Prompt: {extension_prompt[:80]}...")
                 
                 # Extend video
-                task_id = _extend_video(jwt_token, video_id, request.prompt, job_id)
+                task_id = _extend_video(jwt_token, video_id, extension_prompt, job_id)
                 video_url, video_id = _poll_video_status(jwt_token, task_id, job_id, iteration=i+1)
                 
                 # Download extended video (overwrite)
@@ -277,12 +298,12 @@ def _generate_jwt() -> str:
         logger.error(f"JWT generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"JWT generation failed: {str(e)}")
 
-def _create_video(jwt_token: str, request: VideoGenerationRequest, job_id: str) -> str:
+def _create_video(jwt_token: str, request: VideoGenerationRequest, job_id: str, prompt: str) -> str:
     """Create video and return task_id"""
     url = f"{KLING_API_BASE}/videos/text2video"
     
     payload = {
-        "prompt": request.prompt,
+        "prompt": prompt,
         "negative_prompt": request.negative_prompt,
         "model_name": request.model_name,
         "duration": request.duration,

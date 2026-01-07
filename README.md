@@ -75,7 +75,7 @@ Once running, visit:
 POST /generate-video
 ```
 
-**Request:**
+**Request (Single Prompt):**
 
 ```json
 {
@@ -87,6 +87,23 @@ POST /generate-video
   "mode": "pro",
   "sound": "on",
   "target_duration": 30
+}
+```
+
+**Request (Multi-Prompt Array):**
+
+```json
+{
+  "prompts": [
+    "Wide shot of misty forest at dawn, soft golden light filtering through trees",
+    "Camera slowly moves forward through the forest path, revealing a clearing",
+    "Close-up of morning dew on leaves, bokeh background, peaceful atmosphere"
+  ],
+  "model_name": "kling-v2-6",
+  "duration": "10",
+  "aspect_ratio": "16:9",
+  "mode": "pro",
+  "sound": "on"
 }
 ```
 
@@ -234,6 +251,20 @@ N. Download final 30s video
 - **Video Storage**: Local filesystem (configurable)
 
 ## Parameters
+
+### Multi-Prompt Support
+
+The service supports **two modes** for video generation:
+
+1. **Single Prompt Mode**: Use `prompt` field with optional `target_duration`
+   - Service will extend the video using the same prompt
+   - Good for consistent scenes
+
+2. **Multi-Prompt Array Mode**: Use `prompts` array (overrides `prompt`)
+   - Each prompt generates one segment (5s or 10s based on `duration`)
+   - Perfect for storytelling with scene transitions
+   - Max 20 prompts supported
+   - Example: `["Scene 1 description", "Scene 2 description", "Scene 3 description"]`
 
 ### Prompt Guidelines
 
