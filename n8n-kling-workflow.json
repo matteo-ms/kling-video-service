@@ -1,0 +1,190 @@
+{
+  "name": "Kling Video Generation - Complete",
+  "nodes": [
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "prompt",
+              "name": "prompt",
+              "value": "Medium shot of open textbook and penciled notes on desk, amber lamp glow against charcoal shadows, rain tapping softly at window beyond, static with slight focus shift to paper, cinematic, 4k",
+              "type": "string"
+            },
+            {
+              "id": "target_duration",
+              "name": "target_duration",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "aspect_ratio",
+              "name": "aspect_ratio",
+              "value": "16:9",
+              "type": "string"
+            },
+            {
+              "id": "model_name",
+              "name": "model_name",
+              "value": "kling-v2-6",
+              "type": "string"
+            },
+            {
+              "id": "mode",
+              "name": "mode",
+              "value": "pro",
+              "type": "string"
+            },
+            {
+              "id": "sound",
+              "name": "sound",
+              "value": "on",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config-node",
+      "name": "Video Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://your-kling-service.railway.app/generate-video",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"prompt\": \"{{ $json.prompt }}\",\n  \"target_duration\": {{ $json.target_duration }},\n  \"aspect_ratio\": \"{{ $json.aspect_ratio }}\",\n  \"model_name\": \"{{ $json.model_name }}\",\n  \"mode\": \"{{ $json.mode }}\",\n  \"sound\": \"{{ $json.sound }}\"\n}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "generate-node",
+      "name": "Generate Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "job_id",
+              "name": "job_id",
+              "value": "={{ $json.job_id }}",
+              "type": "string"
+            },
+            {
+              "id": "video_url",
+              "name": "video_url",
+              "value": "={{ $json.video_url }}",
+              "type": "string"
+            },
+            {
+              "id": "video_id",
+              "name": "video_id",
+              "value": "={{ $json.video_id }}",
+              "type": "string"
+            },
+            {
+              "id": "duration",
+              "name": "duration",
+              "value": "={{ $json.duration }}",
+              "type": "number"
+            },
+            {
+              "id": "iterations",
+              "name": "iterations",
+              "value": "={{ $json.iterations }}",
+              "type": "number"
+            },
+            {
+              "id": "file_size",
+              "name": "file_size",
+              "value": "={{ $json.file_size }}",
+              "type": "string"
+            },
+            {
+              "id": "generation_time",
+              "name": "generation_time",
+              "value": "={{ $json.generation_time }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "extract-node",
+      "name": "Extract Results",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://your-kling-service.railway.app{{ $json.video_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "download-node",
+      "name": "Download Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Video Config": {
+      "main": [
+        [
+          {
+            "node": "Generate Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Video": {
+      "main": [
+        [
+          {
+            "node": "Extract Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Results": {
+      "main": [
+        [
+          {
+            "node": "Download Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2025-01-07T00:00:00.000Z",
+  "versionId": "1"
+}
+
