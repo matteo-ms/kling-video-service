@@ -627,12 +627,6 @@ def _poll_video_status(jwt_token: str, task_id: str, job_id: str, iteration: int
     raise TimeoutError(f"Video generation timed out after {poll_count} polls ({poll_count * 10 / 60:.1f} minutes)")
 
 def _download_video(video_url: str, output_path: Path):
-
-
-def _save_and_data_uri(upload: UploadFile, job_id: str, prefix: str, allowed, max_size: int) -> str:
-    saved = save_upload_file(upload, job_id, prefix, allowed, max_size)
-    return file_to_data_uri(saved)
-
     """Download video from URL to local path"""
     response = requests.get(video_url, timeout=300)
     response.raise_for_status()
@@ -641,6 +635,11 @@ def _save_and_data_uri(upload: UploadFile, job_id: str, prefix: str, allowed, ma
         f.write(response.content)
     
     logger.info(f"Video downloaded: {output_path.name}")
+
+
+def _save_and_data_uri(upload: UploadFile, job_id: str, prefix: str, allowed, max_size: int) -> str:
+    saved = save_upload_file(upload, job_id, prefix, allowed, max_size)
+    return file_to_data_uri(saved)
 
 @app.get("/videos/{filename}")
 async def get_video(filename: str):
