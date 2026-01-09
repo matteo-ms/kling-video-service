@@ -1,12 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import requests
 import time
 import os
 from pathlib import Path
 import logging
-from typing import Optional
+from typing import Optional, List
 import uuid
 
 logging.basicConfig(
@@ -43,6 +43,24 @@ class CameraControl(BaseModel):
     tilt: Optional[int] = Field(None, description="Tilt movement (-10 to 10)")
     roll: Optional[int] = Field(None, description="Roll movement (-10 to 10)")
     zoom: Optional[int] = Field(None, description="Zoom movement (-10 to 10)")
+
+class MotionControl(BaseModel):
+    """Flexible motion control payload (passes through to Kling)."""
+    model_config = ConfigDict(extra="allow")
+    type: Optional[str] = Field(None, description="Motion control type")
+    strength: Optional[float] = Field(None, description="Motion strength or weight")
+    path: Optional[str] = Field(None, description="Motion path/trajectory")
+
+
+class VoiceControl(BaseModel):
+    """Flexible voice control payload (passes through to Kling)."""
+    model_config = ConfigDict(extra="allow")
+    voice_id: Optional[str] = Field(None, description="Voice preset/ID")
+    language: Optional[str] = Field(None, description="Language code, e.g., en-US")
+    style: Optional[str] = Field(None, description="Voice style")
+    emotion: Optional[str] = Field(None, description="Voice emotion")
+    text: Optional[str] = Field(None, description="Text to synthesize")
+
 
 class VideoGenerationRequest(BaseModel):
     prompt: Optional[str] = Field(None, description="Single video generation prompt", min_length=10, max_length=2500)
