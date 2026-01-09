@@ -5,6 +5,11 @@ FastAPI service for generating long-form videos using **Kling AI** with automati
 ## Features
 
 - ✅ Generate videos from 5s to 100s with automatic extension
+- ✅ Image to Video (uploads)
+- ✅ Lip Sync (audio + face video)
+- ✅ Video to Audio (add/narrate audio)
+- ✅ Multi-Image to Video (2-10 images)
+- ✅ Motion & Voice control options
 - ✅ JWT authentication with external service
 - ✅ Support for Kling v1, v1.5, and v2.6 models
 - ✅ Camera control (pan, tilt, zoom, roll)
@@ -68,6 +73,12 @@ Once running, visit:
 - ReDoc: `http://localhost:8000/redoc`
 
 ### Endpoints
+
+### New Endpoints
+- POST /image2video (upload image + prompt)
+- POST /lipsync (upload video + audio)
+- POST /video2audio (add/generate audio for video)
+- POST /multi-image2video (2-10 images -> video)
 
 #### Generate Video
 

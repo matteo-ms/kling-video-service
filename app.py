@@ -52,6 +52,9 @@ class VideoGenerationRequest(BaseModel):
         description="What to avoid in the video"
     )
     camera_control: Optional[CameraControl] = Field(None, description="Camera movement controls")
+    motion_control: Optional[MotionControl] = Field(None, description="Advanced motion control")
+    motion_brush: Optional[dict] = Field(None, description="Motion brush data")
+    object_motion: Optional[List[dict]] = Field(None, description="Per-object motion")
     model_name: str = Field(
         default="kling-v2-6",
         description="Model to use. Extension support: v1✅, v1-5✅, v1-6✅, v2-6 PRO only",
@@ -77,6 +80,11 @@ class VideoGenerationRequest(BaseModel):
         description="Enable sound generation (on or off)",
         pattern="^(on|off)$"
     )
+    voice_narration: Optional[str] = Field(
+        default=None,
+        description="Narration text to synthesize and mix"
+    )
+    voice_control: Optional[VoiceControl] = Field(default=None, description="Voice control parameters")
     target_duration: Optional[int] = Field(
         None,
         description="Target duration for extended videos (in seconds). If set, will auto-extend.",
@@ -109,6 +117,10 @@ async def root():
             "health": "/health",
             "generate": "POST /generate-video",
             "extend": "POST /extend-video",
+            "image2video": "POST /image2video",
+            "lipsync": "POST /lipsync",
+            "video2audio": "POST /video2audio",
+            "multi_image2video": "POST /multi-image2video",
             "download": "GET /videos/{filename}",
             "list": "GET /videos",
             "docs": "/docs"
@@ -280,6 +292,218 @@ async def extend_video(video_id: str, prompt: str):
         logger.error(f"[{job_id}] ❌ Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Video extension failed: {str(e)}")
 
+def _post_kling(jwt_token: str, path: str, payload: dict, job_id: str) -> dict:
+    url = f"{KLING_API_BASE}/{path}"
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    if response.status_code != 200:
+        try:
+            data = response.json()
+            req_id = data.get("request_id") or data.get("data", {}).get("request_id")
+            msg = data.get("message") or response.text
+            raise KlingAPIError(status_code=response.status_code, message=msg, request_id=req_id)
+        except ValueError:
+            raise KlingAPIError(status_code=response.status_code, message=response.text)
+    return response.json()
+
+
+
+
+@app.post("/image2video")
+async def image2video(
+    image: UploadFile = File(...),
+    prompt: str = Form(...),
+    negative_prompt: str = Form("blurry, distorted"),
+    model_name: str = Form("kling-v1-6"),
+    duration: str = Form("10"),
+    aspect_ratio: str = Form("16:9"),
+    mode: str = Form("pro"),
+    start_frame: UploadFile | None = File(None),
+    end_frame: UploadFile | None = File(None),
+    motion_control: str | None = Form(None),
+):
+    """Image to Video generation."""
+    job_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    jwt_token = _generate_jwt()
+
+    image_uri = _save_and_data_uri(image, job_id, "image", IMAGE_EXTS, MAX_IMAGE_SIZE)
+    payload = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "model_name": model_name,
+        "duration": duration,
+        "aspect_ratio": aspect_ratio,
+        "mode": mode,
+        "image": {"url": image_uri},
+    }
+    if start_frame:
+        payload["start_frame"] = {"url": _save_and_data_uri(start_frame, job_id, "start", IMAGE_EXTS, MAX_IMAGE_SIZE)}
+    if end_frame:
+        payload["end_frame"] = {"url": _save_and_data_uri(end_frame, job_id, "end", IMAGE_EXTS, MAX_IMAGE_SIZE)}
+    if motion_control:
+        try:
+            payload["motion_control"] = json.loads(motion_control)
+        except Exception:
+            pass
+
+    resp = _post_kling(jwt_token, "videos/image2video", payload, job_id)
+    task_id = resp.get("data", {}).get("task_id") or resp.get("data", {}).get("id")
+    video_url, video_id = poll_task_status(jwt_token, KLING_API_BASE, task_id, "videos/image2video", logger)
+
+    output_filename = f"kling_img_{job_id}_{int(time.time())}.mp4"
+    output_path = VIDEOS_DIR / output_filename
+    _download_video(video_url, output_path)
+
+    file_size = output_path.stat().st_size
+    return JobResponse(
+        job_id=job_id,
+        task_id=task_id,
+        status="succeed",
+        result_url=f"/videos/{output_filename}",
+        file_size=f"{file_size / (1024*1024):.2f} MB",
+        generation_time=round(time.time() - start_time, 2),
+        raw_response={"video_id": video_id}
+    )
+
+
+@app.post("/lipsync")
+async def lipsync(
+    video: UploadFile = File(...),
+    audio: UploadFile = File(...),
+    mode: str = Form("pro"),
+):
+    job_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    jwt_token = _generate_jwt()
+
+    video_uri = _save_and_data_uri(video, job_id, "video", VIDEO_EXTS, MAX_VIDEO_SIZE)
+    audio_uri = _save_and_data_uri(audio, job_id, "audio", AUDIO_EXTS, MAX_AUDIO_SIZE)
+
+    payload = {
+        "video": {"url": video_uri},
+        "audio": {"url": audio_uri},
+        "mode": mode,
+    }
+    resp = _post_kling(jwt_token, "videos/lip-sync", payload, job_id)
+    task_id = resp.get("data", {}).get("task_id") or resp.get("data", {}).get("id")
+    video_url, video_id = poll_task_status(jwt_token, KLING_API_BASE, task_id, "videos/lip-sync", logger)
+
+    output_filename = f"kling_lipsync_{job_id}_{int(time.time())}.mp4"
+    output_path = VIDEOS_DIR / output_filename
+    _download_video(video_url, output_path)
+    file_size = output_path.stat().st_size
+    return JobResponse(
+        job_id=job_id,
+        task_id=task_id,
+        status="succeed",
+        result_url=f"/videos/{output_filename}",
+        file_size=f"{file_size / (1024*1024):.2f} MB",
+        generation_time=round(time.time() - start_time, 2),
+        raw_response={"video_id": video_id}
+    )
+
+
+@app.post("/video2audio")
+async def video2audio(
+    prompt: str = Form(...),
+    video_id: str | None = Form(None),
+    video_url: str | None = Form(None),
+    video_file: UploadFile | None = File(None),
+    voice_control: str | None = Form(None),
+):
+    job_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    jwt_token = _generate_jwt()
+
+    payload = {
+        "prompt": prompt,
+    }
+    if video_id:
+        payload["video_id"] = video_id
+    elif video_url:
+        payload["video"] = {"url": video_url}
+    elif video_file:
+        payload["video"] = {"url": _save_and_data_uri(video_file, job_id, "video", VIDEO_EXTS, MAX_VIDEO_SIZE)}
+    if voice_control:
+        try:
+            payload["voice_control"] = json.loads(voice_control)
+        except Exception:
+            pass
+
+    resp = _post_kling(jwt_token, "videos/video2audio", payload, job_id)
+    task_id = resp.get("data", {}).get("task_id") or resp.get("data", {}).get("id")
+    result_url, result_id = poll_task_status(jwt_token, KLING_API_BASE, task_id, "videos/video2audio", logger)
+
+    output_filename = f"kling_audio_{job_id}_{int(time.time())}.mp4"
+    output_path = VIDEOS_DIR / output_filename
+    _download_video(result_url, output_path)
+    file_size = output_path.stat().st_size
+    return JobResponse(
+        job_id=job_id,
+        task_id=task_id,
+        status="succeed",
+        result_url=f"/videos/{output_filename}",
+        file_size=f"{file_size / (1024*1024):.2f} MB",
+        generation_time=round(time.time() - start_time, 2),
+        raw_response={"audio_id": result_id}
+    )
+
+
+@app.post("/multi-image2video")
+async def multi_image2video(
+    images: List[UploadFile] = File(...),
+    prompt: str = Form(...),
+    negative_prompt: str = Form("blurry, distorted"),
+    model_name: str = Form("kling-v1-6"),
+    duration: str = Form("10"),
+    aspect_ratio: str = Form("16:9"),
+    mode: str = Form("pro"),
+):
+    if len(images) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 images are required")
+    if len(images) > 10:
+        raise HTTPException(status_code=400, detail="Max 10 images allowed")
+
+    job_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    jwt_token = _generate_jwt()
+
+    image_items = []
+    for idx, img in enumerate(images):
+        image_items.append({"url": _save_and_data_uri(img, job_id, f"img{idx}", IMAGE_EXTS, MAX_IMAGE_SIZE)})
+
+    payload = {
+        "images": image_items,
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "model_name": model_name,
+        "duration": duration,
+        "aspect_ratio": aspect_ratio,
+        "mode": mode,
+    }
+
+    resp = _post_kling(jwt_token, "videos/multi-image2video", payload, job_id)
+    task_id = resp.get("data", {}).get("task_id") or resp.get("data", {}).get("id")
+    video_url, video_id = poll_task_status(jwt_token, KLING_API_BASE, task_id, "videos/multi-image2video", logger)
+
+    output_filename = f"kling_multi_{job_id}_{int(time.time())}.mp4"
+    output_path = VIDEOS_DIR / output_filename
+    _download_video(video_url, output_path)
+    file_size = output_path.stat().st_size
+    return JobResponse(
+        job_id=job_id,
+        task_id=task_id,
+        status="succeed",
+        result_url=f"/videos/{output_filename}",
+        file_size=f"{file_size / (1024*1024):.2f} MB",
+        generation_time=round(time.time() - start_time, 2),
+        raw_response={"video_id": video_id}
+    )
+
 def _generate_jwt() -> str:
     """Generate JWT token from access_key and secret_key"""
     try:
@@ -314,6 +538,16 @@ def _create_video(jwt_token: str, request: VideoGenerationRequest, job_id: str, 
     
     if request.camera_control:
         payload["camera_control"] = request.camera_control.model_dump(exclude_none=True)
+    if getattr(request, "motion_control", None):
+        payload["motion_control"] = request.motion_control.model_dump(exclude_none=True)
+    if getattr(request, "motion_brush", None):
+        payload["motion_brush"] = request.motion_brush
+    if getattr(request, "object_motion", None):
+        payload["object_motion"] = request.object_motion
+    if getattr(request, "voice_narration", None):
+        payload["voice_narration"] = request.voice_narration
+    if getattr(request, "voice_control", None):
+        payload["voice_control"] = request.voice_control.model_dump(exclude_none=True)
     
     headers = {
         "Authorization": f"Bearer {jwt_token}",
@@ -393,6 +627,12 @@ def _poll_video_status(jwt_token: str, task_id: str, job_id: str, iteration: int
     raise TimeoutError(f"Video generation timed out after {poll_count} polls ({poll_count * 10 / 60:.1f} minutes)")
 
 def _download_video(video_url: str, output_path: Path):
+
+
+def _save_and_data_uri(upload: UploadFile, job_id: str, prefix: str, allowed, max_size: int) -> str:
+    saved = save_upload_file(upload, job_id, prefix, allowed, max_size)
+    return file_to_data_uri(saved)
+
     """Download video from URL to local path"""
     response = requests.get(video_url, timeout=300)
     response.raise_for_status()
