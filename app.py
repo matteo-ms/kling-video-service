@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ConfigDict
 import requests
@@ -8,6 +8,9 @@ from pathlib import Path
 import logging
 from typing import Optional, List
 import uuid
+import json
+import base64
+import mimetypes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +37,62 @@ if not KLING_ACCESS_KEY or not KLING_SECRET_KEY:
 # Video storage
 VIDEOS_DIR = Path(os.getenv("VIDEOS_DIR", "/tmp/videos"))
 VIDEOS_DIR.mkdir(exist_ok=True, parents=True)
+
+# File upload constraints
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+VIDEO_EXTS = {".mp4", ".mov", ".webm"}
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac"}
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_AUDIO_SIZE = 20 * 1024 * 1024  # 20MB
+
+
+class KlingAPIError(Exception):
+    """Custom exception for Kling API errors"""
+    def __init__(self, status_code: int, message: str, request_id: str = None):
+        self.status_code = status_code
+        self.message = message
+        self.request_id = request_id
+        super().__init__(f"Kling API Error {status_code}: {message}")
+
+
+class JobResponse(BaseModel):
+    """Generic response for async jobs"""
+    job_id: str
+    task_id: str
+    status: str
+    result_url: Optional[str] = None
+    file_size: Optional[str] = None
+    generation_time: Optional[float] = None
+    raw_response: Optional[dict] = None
+
+
+def save_upload_file(upload: UploadFile, job_id: str, prefix: str, allowed_exts: set, max_size: int) -> Path:
+    """Save uploaded file to temp directory with validation"""
+    # Get extension
+    ext = Path(upload.filename).suffix.lower() if upload.filename else ""
+    if ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {allowed_exts}")
+    
+    # Read content
+    content = upload.file.read()
+    if len(content) > max_size:
+        raise HTTPException(status_code=400, detail=f"File too large. Max: {max_size // (1024*1024)}MB")
+    
+    # Save to temp file
+    temp_path = VIDEOS_DIR / f"{prefix}_{job_id}{ext}"
+    temp_path.write_bytes(content)
+    
+    return temp_path
+
+
+def file_to_data_uri(file_path: Path) -> str:
+    """Convert file to base64 data URI"""
+    content = file_path.read_bytes()
+    b64 = base64.b64encode(content).decode("utf-8")
+    mime_type, _ = mimetypes.guess_type(str(file_path))
+    mime_type = mime_type or "application/octet-stream"
+    return f"data:{mime_type};base64,{b64}"
 
 class CameraControl(BaseModel):
     type: Optional[str] = Field(None, description="Camera movement type")
@@ -65,6 +124,8 @@ class VoiceControl(BaseModel):
 class VideoGenerationRequest(BaseModel):
     prompt: Optional[str] = Field(None, description="Single video generation prompt", min_length=10, max_length=2500)
     prompts: Optional[list[str]] = Field(None, description="Array of prompts for multi-segment videos. If provided, overrides 'prompt'.")
+    image_base64: Optional[str] = Field(None, description="Base64 encoded image to start from (uses image2video for first segment)")
+    image_mime_type: Optional[str] = Field("image/png", description="MIME type of the image (image/png, image/jpeg, image/webp)")
     negative_prompt: Optional[str] = Field(
         default="blurry, distorted, low quality, watermark, text, ugly, deformed",
         description="What to avoid in the video"
@@ -201,12 +262,18 @@ async def generate_video(request: VideoGenerationRequest):
         jwt_token = _generate_jwt()
         logger.info(f"[{job_id}] JWT generated successfully")
         
-        # Step 2: Create initial video with first prompt
-        task_id = _create_video(jwt_token, request, job_id, initial_prompt)
+        # Step 2: Create initial video with first prompt (image2video or text2video)
+        if request.image_base64:
+            logger.info(f"[{job_id}] Using image2video mode (base64 image provided)")
+            task_id = _create_video_from_image(jwt_token, request, job_id, initial_prompt)
+            poll_endpoint = "image2video"
+        else:
+            task_id = _create_video(jwt_token, request, job_id, initial_prompt)
+            poll_endpoint = "text2video"
         logger.info(f"[{job_id}] Video creation started - Task ID: {task_id}")
         
         # Step 3: Poll for completion and get video_id
-        video_url, video_id = _poll_video_status(jwt_token, task_id, job_id, iteration=0)
+        video_url, video_id = _poll_video_status(jwt_token, task_id, job_id, iteration=0, endpoint=poll_endpoint)
         logger.info(f"[{job_id}] Initial video ready - Video ID: {video_id}")
         
         # Step 4: Download initial video
@@ -581,6 +648,46 @@ def _create_video(jwt_token: str, request: VideoGenerationRequest, job_id: str, 
     data = response.json()
     return data["data"]["task_id"]
 
+def _create_video_from_image(jwt_token: str, request: VideoGenerationRequest, job_id: str, prompt: str) -> str:
+    """Create video from base64 image and return task_id (image2video)"""
+    url = f"{KLING_API_BASE}/videos/image2video"
+    
+    # Build data URI from base64
+    mime_type = request.image_mime_type or "image/png"
+    image_data_uri = f"data:{mime_type};base64,{request.image_base64}"
+    
+    payload = {
+        "prompt": prompt,
+        "negative_prompt": request.negative_prompt,
+        "model_name": request.model_name,
+        "duration": request.duration,
+        "aspect_ratio": request.aspect_ratio,
+        "mode": request.mode,
+        "image": {"url": image_data_uri}
+    }
+    
+    if request.camera_control:
+        payload["camera_control"] = request.camera_control.model_dump(exclude_none=True)
+    if getattr(request, "motion_control", None):
+        payload["motion_control"] = request.motion_control.model_dump(exclude_none=True)
+    
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    
+    logger.info(f"[{job_id}] Calling image2video API with {len(request.image_base64)} chars base64")
+    
+    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    
+    if response.status_code != 200:
+        logger.error(f"[{job_id}] Kling image2video API error: {response.text}")
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    
+    data = response.json()
+    return data["data"]["task_id"]
+
+
 def _extend_video(jwt_token: str, video_id: str, prompt: str, job_id: str) -> str:
     """Extend video and return task_id"""
     url = f"{KLING_API_BASE}/videos/video-extend"
@@ -604,9 +711,9 @@ def _extend_video(jwt_token: str, video_id: str, prompt: str, job_id: str) -> st
     data = response.json()
     return data["data"]["task_id"]
 
-def _poll_video_status(jwt_token: str, task_id: str, job_id: str, iteration: int, max_polls: int = 60) -> tuple[str, str]:
+def _poll_video_status(jwt_token: str, task_id: str, job_id: str, iteration: int, max_polls: int = 60, endpoint: str = "text2video") -> tuple[str, str]:
     """Poll video status until ready and return (video_url, video_id)"""
-    url = f"{KLING_API_BASE}/videos/text2video/{task_id}"
+    url = f"{KLING_API_BASE}/videos/{endpoint}/{task_id}"
     headers = {"Authorization": f"Bearer {jwt_token}"}
     
     poll_count = 0
@@ -653,6 +760,54 @@ def _download_video(video_url: str, output_path: Path):
         f.write(response.content)
     
     logger.info(f"Video downloaded: {output_path.name}")
+
+
+def poll_task_status(jwt_token: str, api_base: str, task_id: str, endpoint: str, log, max_polls: int = 60) -> tuple[str, str]:
+    """Generic poll for any Kling task. Returns (result_url, result_id)."""
+    url = f"{api_base}/{endpoint}/{task_id}"
+    headers = {"Authorization": f"Bearer {jwt_token}"}
+    
+    poll_count = 0
+    start_time = time.time()
+    
+    while poll_count < max_polls:
+        poll_count += 1
+        elapsed = time.time() - start_time
+        
+        log.info(f"Polling {endpoint} - #{poll_count} (elapsed: {elapsed:.0f}s)")
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        task_status = data["data"]["task_status"]
+        
+        log.info(f"Status: {task_status}")
+        
+        if task_status == "succeed":
+            task_result = data["data"]["task_result"]
+            # Handle different result structures
+            if "videos" in task_result:
+                result_url = task_result["videos"][0]["url"]
+                result_id = task_result["videos"][0].get("id", "")
+            elif "audio" in task_result:
+                result_url = task_result["audio"]["url"]
+                result_id = task_result["audio"].get("id", "")
+            else:
+                # Fallback
+                result_url = task_result.get("url", "")
+                result_id = task_result.get("id", "")
+            log.info(f"✅ Task ready after {elapsed:.0f}s")
+            return result_url, result_id
+        elif task_status in ["submitted", "processing"]:
+            time.sleep(10)
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Task failed with status: {task_status}"
+            )
+    
+    raise TimeoutError(f"Task timed out after {poll_count} polls")
 
 
 def _save_and_data_uri(upload: UploadFile, job_id: str, prefix: str, allowed, max_size: int) -> str:
