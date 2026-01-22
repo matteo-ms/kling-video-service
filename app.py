@@ -648,14 +648,96 @@ def _create_video(jwt_token: str, request: VideoGenerationRequest, job_id: str, 
     data = response.json()
     return data["data"]["task_id"]
 
+def _clean_base64(raw_base64: str) -> tuple[str, str]:
+    """
+    Clean base64 string: strip data URI prefix if present, remove whitespace,
+    convert URL-safe base64 to standard base64.
+    Returns (clean_base64, detected_mime_type)
+    """
+    data = raw_base64.strip()
+    mime_type = "image/png"  # default
+    
+    # Strip data URI prefix if present (e.g., "data:image/png;base64,...")
+    if data.startswith("data:"):
+        # Extract mime type and base64 part
+        try:
+            header, b64_part = data.split(",", 1)
+            # header = "data:image/png;base64"
+            mime_part = header.replace("data:", "").replace(";base64", "")
+            if mime_part:
+                mime_type = mime_part
+            data = b64_part
+        except ValueError:
+            pass  # Malformed, try to use as-is
+    
+    # Remove any whitespace/newlines that might be in the base64
+    data = data.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
+    
+    # Convert URL-safe base64 to standard base64 (- -> +, _ -> /)
+    data = data.replace("-", "+").replace("_", "/")
+    
+    # Fix padding if needed (base64 must be multiple of 4)
+    padding_needed = len(data) % 4
+    if padding_needed:
+        data += "=" * (4 - padding_needed)
+    
+    # Auto-detect mime from base64 magic bytes if not already set
+    if mime_type == "image/png":
+        if data.startswith("/9j/"):
+            mime_type = "image/jpeg"
+        elif data.startswith("iVBORw0KGgo"):
+            mime_type = "image/png"
+        elif data.startswith("R0lGOD"):
+            mime_type = "image/gif"
+        elif data.startswith("UklGR"):
+            mime_type = "image/webp"
+    
+    return data, mime_type
+
+
 def _create_video_from_image(jwt_token: str, request: VideoGenerationRequest, job_id: str, prompt: str) -> str:
     """Create video from base64 image and return task_id (image2video)"""
     url = f"{KLING_API_BASE}/videos/image2video"
     
-    # Build data URI from base64
-    mime_type = request.image_mime_type or "image/png"
-    image_data_uri = f"data:{mime_type};base64,{request.image_base64}"
+    # Clean and validate base64
+    clean_b64, detected_mime = _clean_base64(request.image_base64)
+    mime_type = request.image_mime_type or detected_mime
     
+    logger.info(f"[{job_id}] Base64 cleaned: {len(request.image_base64)} -> {len(clean_b64)} chars, mime: {mime_type}")
+    logger.info(f"[{job_id}] Base64 first 50 chars: {clean_b64[:50]}")
+    
+    # Decode base64 to bytes and validate
+    try:
+        decoded = base64.b64decode(clean_b64)
+        logger.info(f"[{job_id}] Base64 decoded OK: {len(decoded)} bytes")
+        
+        # Verify it's actually an image by checking magic bytes
+        if decoded[:2] == b'\xff\xd8':
+            logger.info(f"[{job_id}] Image verified as JPEG")
+            ext = ".jpg"
+            mime_type = "image/jpeg"
+        elif decoded[:8] == b'\x89PNG\r\n\x1a\n':
+            logger.info(f"[{job_id}] Image verified as PNG")
+            ext = ".png"
+            mime_type = "image/png"
+        elif decoded[:4] == b'RIFF':
+            logger.info(f"[{job_id}] Image verified as WEBP")
+            ext = ".webp"
+            mime_type = "image/webp"
+        else:
+            logger.warning(f"[{job_id}] Unknown image format, first bytes: {decoded[:10].hex()}")
+            ext = ".jpg"  # default
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
+    
+    # Re-encode the decoded bytes to clean base64
+    clean_b64_final = base64.b64encode(decoded).decode("utf-8")
+    logger.info(f"[{job_id}] Re-encoded base64: {len(clean_b64_final)} chars")
+    
+    # Build data URI as fallback
+    image_data_uri = f"data:{mime_type};base64,{clean_b64_final}"
+    
+    # Try bytesBase64Encoded format first (like Google Veo)
     payload = {
         "prompt": prompt,
         "negative_prompt": request.negative_prompt,
@@ -663,8 +745,13 @@ def _create_video_from_image(jwt_token: str, request: VideoGenerationRequest, jo
         "duration": request.duration,
         "aspect_ratio": request.aspect_ratio,
         "mode": request.mode,
-        "image": {"url": image_data_uri}
+        "image": {
+            "bytesBase64Encoded": clean_b64_final,
+            "mimeType": mime_type
+        }
     }
+    
+    logger.info(f"[{job_id}] Trying bytesBase64Encoded format first...")
     
     if request.camera_control:
         payload["camera_control"] = request.camera_control.model_dump(exclude_none=True)
@@ -676,13 +763,22 @@ def _create_video_from_image(jwt_token: str, request: VideoGenerationRequest, jo
         "Content-Type": "application/json"
     }
     
-    logger.info(f"[{job_id}] Calling image2video API with {len(request.image_base64)} chars base64")
+    logger.info(f"[{job_id}] Calling image2video API (attempt 1: bytesBase64Encoded)...")
     
-    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+    
+    # If bytesBase64Encoded fails, try data URI format
+    if response.status_code != 200:
+        logger.warning(f"[{job_id}] bytesBase64Encoded failed [{response.status_code}], trying data URI format...")
+        
+        payload["image"] = {"url": image_data_uri}
+        logger.info(f"[{job_id}] Calling image2video API (attempt 2: data URI, {len(image_data_uri)} chars)...")
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=120)
     
     if response.status_code != 200:
-        logger.error(f"[{job_id}] Kling image2video API error: {response.text}")
-        raise HTTPException(status_code=response.status_code, detail=response.text)
+        logger.error(f"[{job_id}] Kling image2video API error [{response.status_code}]: {response.text}")
+        raise HTTPException(status_code=response.status_code, detail=f"{response.status_code}: {response.text}")
     
     data = response.json()
     return data["data"]["task_id"]
